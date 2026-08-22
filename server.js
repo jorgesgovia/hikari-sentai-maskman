@@ -14,12 +14,84 @@ const episodes = JSON.parse(
   fs.readFileSync("./drive-episodes.json", "utf8")
 );
 
+/* =========================================================
+   GOOGLE DRIVE
+   Obtiene dinámicamente el UUID de confirmación para archivos
+   grandes que muestran la pantalla "Download anyway".
+   ========================================================= */
+
+async function resolveDriveUrl(originalUrl) {
+  try {
+    const response = await fetch(originalUrl, {
+      redirect: "follow",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15"
+      }
+    });
+
+    const finalUrl = response.url;
+    const contentType =
+      response.headers.get("content-type") || "";
+
+    /*
+     * Si Drive ya entrega directamente el MP4,
+     * no necesitamos confirmación.
+     */
+    if (
+      contentType.toLowerCase().includes("video/mp4")
+    ) {
+      return finalUrl;
+    }
+
+    const html = await response.text();
+
+    /*
+     * Google Drive coloca el UUID dentro del formulario
+     * de "Download anyway".
+     */
+    const uuidMatch = html.match(
+      /name=["']uuid["'][^>]*value=["']([^"']+)["']/i
+    );
+
+    if (!uuidMatch) {
+      throw new Error(
+        "Google Drive no proporcionó UUID de confirmación"
+      );
+    }
+
+    const uuid = uuidMatch[1];
+
+    const separator = originalUrl.includes("?")
+      ? "&"
+      : "?";
+
+    const confirmedUrl =
+      `${originalUrl}${separator}confirm=t&uuid=${encodeURIComponent(uuid)}`;
+
+    return confirmedUrl;
+
+  } catch (error) {
+    console.error(
+      "Error resolviendo Google Drive:",
+      error.message
+    );
+
+    return null;
+  }
+}
+
+/* =========================================================
+   MANIFEST
+   ========================================================= */
+
 app.get("/manifest.json", (req, res) => {
   res.json({
     id: "org.hikarimaskman.addon",
-    version: "1.0.0",
+    version: "1.0.1",
     name: "Hikari Sentai Maskman",
-    description: "Hikari Sentai Maskman - complete series metadata",
+    description:
+      "Hikari Sentai Maskman - complete series metadata",
     resources: [
       "catalog",
       "meta",
@@ -38,6 +110,10 @@ app.get("/manifest.json", (req, res) => {
   });
 });
 
+/* =========================================================
+   CATALOG
+   ========================================================= */
+
 app.get(
   "/catalog/series/hikari-sentai-maskman.json",
   (req, res) => {
@@ -46,6 +122,10 @@ app.get(
     });
   }
 );
+
+/* =========================================================
+   META
+   ========================================================= */
 
 app.get(
   "/meta/series/:id.json",
@@ -77,93 +157,131 @@ app.get(
   }
 );
 
+/* =========================================================
+   STREAM
+   ========================================================= */
+
 app.get(
   "/stream/series/:id.json",
-  (req, res) => {
+  async (req, res) => {
 
-    const rawId = req.params.id;
+    try {
 
-    /*
-      Formato de episodio:
+      const rawId = req.params.id;
 
-      tt0092371:1:1
-      tt0092371:1:2
-      tt0092371:1:50
-    */
+      /*
+       * Stremio puede pedir:
+       *
+       * tt0092371
+       * tt0092371:1:1
+       * tt0092371:1:50
+       */
 
-    const match = rawId.match(
-      /^(.+):(\d+):(\d+)$/
-    );
+      const parts = rawId.split(":");
 
-    let seriesId = rawId;
-    let episodeNumber = null;
+      const seriesId = parts[0];
 
-    if (match) {
-      seriesId = match[1];
-      episodeNumber = Number(match[3]);
-    }
+      const season =
+        parts.length >= 2
+          ? parseInt(parts[1], 10)
+          : 1;
 
-    const item = metas.find(
-      x =>
-        x.id === seriesId ||
-        x.imdb_id === seriesId ||
-        x.tmdb_id === seriesId
-    );
+      const episodeNumber =
+        parts.length >= 3
+          ? parseInt(parts[2], 10)
+          : null;
 
-    if (!item) {
-      return res.status(404).json({
-        err: "Meta not found"
-      });
-    }
-
-    /*
-      EPISODIO INDIVIDUAL
-    */
-
-    if (episodeNumber !== null) {
-
-      const ep = episodes.find(
-        e => Number(e.episode) === episodeNumber
+      const item = metas.find(
+        x =>
+          x.id === seriesId ||
+          x.imdb_id === seriesId ||
+          x.tmdb_id === seriesId
       );
 
-      if (!ep) {
+      if (!item) {
         return res.status(404).json({
-          err: "Episode not found"
+          err: "Meta not found"
         });
       }
 
-      return res.json({
-        streams: [
-          {
-            name: "Google Drive",
-            title:
-              `E${String(ep.episode).padStart(2, "0")} - ` +
-              `${ep.name.replace(/\.mp4$/i, "")}`,
-            url: ep.url,
-            type: "video/mp4"
-          }
-        ]
+      /*
+       * Si Stremio solicita un episodio concreto,
+       * devolver SOLO ese episodio.
+       */
+
+      let selectedEpisodes = episodes;
+
+      if (
+        episodeNumber !== null &&
+        !isNaN(episodeNumber)
+      ) {
+        selectedEpisodes = episodes.filter(
+          ep =>
+            parseInt(ep.episode, 10) ===
+            episodeNumber
+        );
+      }
+
+      if (!selectedEpisodes.length) {
+        return res.json({
+          streams: []
+        });
+      }
+
+      const streams = [];
+
+      /*
+       * Resolver dinámicamente cada URL.
+       */
+
+      for (const ep of selectedEpisodes) {
+
+        const resolvedUrl =
+          await resolveDriveUrl(ep.url);
+
+        if (!resolvedUrl) {
+          console.error(
+            `No se pudo resolver E${String(ep.episode).padStart(2, "0")}`
+          );
+
+          continue;
+        }
+
+        streams.push({
+          name: "Google Drive",
+
+          title:
+            `E${String(ep.episode).padStart(2, "0")} - ` +
+            ep.name.replace(/\.mp4$/i, ""),
+
+          url: resolvedUrl,
+
+          type: "video/mp4"
+        });
+      }
+
+      res.json({
+        streams
+      });
+
+    } catch (error) {
+
+      console.error(
+        "STREAM ERROR:",
+        error
+      );
+
+      res.status(500).json({
+        err: "Stream resolution error",
+        message: error.message
       });
     }
-
-    /*
-      SERIE COMPLETA
-    */
-
-    const streams = episodes.map(ep => ({
-      name: "Google Drive",
-      title:
-        `E${String(ep.episode).padStart(2, "0")} - ` +
-        `${ep.name.replace(/\.mp4$/i, "")}`,
-      url: ep.url,
-      type: "video/mp4"
-    }));
-
-    res.json({
-      streams
-    });
   }
 );
+
+/* =========================================================
+   ROOT
+   ========================================================= */
 
 app.get("/", (req, res) => {
   res.json({
@@ -174,8 +292,13 @@ app.get("/", (req, res) => {
   });
 });
 
+/* =========================================================
+   START
+   ========================================================= */
+
 app.listen(PORT, () => {
   console.log(
-    "Hikari Sentai Maskman running on port " + PORT
+    "Hikari Sentai Maskman running on port " +
+    PORT
   );
 });
