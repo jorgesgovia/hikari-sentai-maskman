@@ -10,23 +10,24 @@ const data = JSON.parse(
 
 const metas = data.metas || [];
 
+const episodes = JSON.parse(
+  fs.readFileSync("./drive-episodes.json", "utf8")
+);
+
 app.get("/manifest.json", (req, res) => {
   res.json({
     id: "org.hikarimaskman.addon",
     version: "1.0.0",
     name: "Hikari Sentai Maskman",
-    description:
-      "Hikari Sentai Maskman - complete series metadata",
-
+    description: "Hikari Sentai Maskman - complete series metadata",
     resources: [
       "catalog",
-      "meta"
+      "meta",
+      "stream"
     ],
-
     types: [
       "series"
     ],
-
     catalogs: [
       {
         type: "series",
@@ -76,10 +77,99 @@ app.get(
   }
 );
 
+app.get(
+  "/stream/series/:id.json",
+  (req, res) => {
+
+    const rawId = req.params.id;
+
+    /*
+      Formato de episodio:
+
+      tt0092371:1:1
+      tt0092371:1:2
+      tt0092371:1:50
+    */
+
+    const match = rawId.match(
+      /^(.+):(\d+):(\d+)$/
+    );
+
+    let seriesId = rawId;
+    let episodeNumber = null;
+
+    if (match) {
+      seriesId = match[1];
+      episodeNumber = Number(match[3]);
+    }
+
+    const item = metas.find(
+      x =>
+        x.id === seriesId ||
+        x.imdb_id === seriesId ||
+        x.tmdb_id === seriesId
+    );
+
+    if (!item) {
+      return res.status(404).json({
+        err: "Meta not found"
+      });
+    }
+
+    /*
+      EPISODIO INDIVIDUAL
+    */
+
+    if (episodeNumber !== null) {
+
+      const ep = episodes.find(
+        e => Number(e.episode) === episodeNumber
+      );
+
+      if (!ep) {
+        return res.status(404).json({
+          err: "Episode not found"
+        });
+      }
+
+      return res.json({
+        streams: [
+          {
+            name: "Google Drive",
+            title:
+              `E${String(ep.episode).padStart(2, "0")} - ` +
+              `${ep.name.replace(/\.mp4$/i, "")}`,
+            url: ep.url,
+            type: "video/mp4"
+          }
+        ]
+      });
+    }
+
+    /*
+      SERIE COMPLETA
+    */
+
+    const streams = episodes.map(ep => ({
+      name: "Google Drive",
+      title:
+        `E${String(ep.episode).padStart(2, "0")} - ` +
+        `${ep.name.replace(/\.mp4$/i, "")}`,
+      url: ep.url,
+      type: "video/mp4"
+    }));
+
+    res.json({
+      streams
+    });
+  }
+);
+
 app.get("/", (req, res) => {
   res.json({
     addon: "Hikari Sentai Maskman",
     total: metas.length,
+    episodes: episodes.length,
     status: "online"
   });
 });
