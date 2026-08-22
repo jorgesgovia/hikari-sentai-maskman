@@ -104,7 +104,7 @@ app.get("/manifest.json", (req, res) => {
       {
         type: "series",
         id: "hikari-sentai-maskman",
-        name: "✨ Hikari Sentai Maskman"
+        name: "Hikari Sentai Maskman"
       }
     ]
   });
